@@ -1,6 +1,8 @@
-$WORKDIR = "D:\ClusterInstall"
-$ConfigurationPath = "D:\Cloud\upload\Deploy\IP_Passwords.csv"
-$NetworkDefinitionsPath = "D:\doku\scripts\Deploy\NetworkDefinitions.csv"
+param (
+    $WORKDIR = "d:\temp",
+    $ConfigurationPath = ".\configuration.csv",
+    $NetworkDefinitionsPath = ".\NetworkDefinitions.csv"
+)
 
 class MyConfiguration {
     [STRING]$Name
@@ -13,14 +15,14 @@ class MyConfiguration {
         
         $Configuration | foreach {
             $config = $_
-            #suche nach dem namen
+            #search for name
             if($Config.Hostname -match $this.Name){
                 $Config | Get-Member -MemberType NoteProperty | foreach {
                     $this | Add-Member -Name $_.Name -MemberType $_.MemberType -Value $_.value
                     $this.($_.Name) = $Config.($_.Name)
                 }
             }
-            #suche nach der mac
+            #search for bootmac
             elseif ($config.BOOTMAC -match $this.Name) {
                 $this.Name = $Config.Hostname
                 $Config | Get-Member -MemberType NoteProperty | foreach {
@@ -42,6 +44,15 @@ class MyConfiguration {
         }
         $Result
     }
+    create(){
+        # create vm if virtual or create prepare wim and wds to boot from
+    }
 
+    append(){
+        # append to configuration if it not exists
+    }
 
+    save(){
+        # save to csv 
+    }
 }
