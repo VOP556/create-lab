@@ -59,7 +59,14 @@ class Network {
             $this | Add-Member -MemberType NoteProperty -Name $_ -Value $Hash.$_ -Force
         }
     }
-
+#region methods
+    [hashtable] getConfigurationData(){
+        $Hash = @{}
+        $this | Get-Member -MemberType NoteProperty,Property | ForEach-Object{
+            $Hash.Add($_.Name,$this.($_.Name))
+        }
+        return $Hash
+    }
  }
 
 
@@ -116,17 +123,19 @@ class Node {
         if($Hash.contains("Networks")){
             $this | Add-Member -MemberType NoteProperty -Name "Networks" -value @() -force
             $this | Get-Member -MemberType NoteProperty | ForEach-Object {
-                
-                if($this.($_.Name) -is [STRING]){
-                    $LastIndexOf = ($this.($_.Name)).lastindexof(".")
-                    if ($LastIndexOf -gt 0) {
-                        $Value = ($this.($_.Name)).substring(0,$LastIndexOf)
-                        $Hash.Networks.keys | ForEach-Object {
-                            if($Hash.Networks.$_ -match $Value){
-                                $Network = [Network]::new($Hash.Networks.$_)
-                                $Network.IPAddress = $this.$_
-                            }
+                $NoteProperty = $_.Name
+                if ($Hash.Networks.contains($NoteProperty)) {
+                    $Contains = $false
+                    $this.Networks | ForEach-Object{
+                        $Network = $_
+                        if ($Network.Name -match $NoteProperty) {
+                            $Contains = $true
                         }
+                    }
+                    if (!$Contains) {
+                        $NewNetwork = [Network]::new($Hash.Networks.$NoteProperty)
+                        $NewNetwork.IPAddress = $this.$NoteProperty
+                        $this.networks += $NewNetwork
                     }
                 }
             }
@@ -166,7 +175,7 @@ class Node {
 
         $this.Name = $Hash.Nodename
 
-    }
+     }
 
     
     init([PSObject]$obj){
@@ -175,7 +184,7 @@ class Node {
 
         }
 
-    }
+     }
 
     [hashtable] getConfigurationData(){
          $ConfigurationData = @{
@@ -189,21 +198,39 @@ class Node {
          
          }
 
-         $this | Get-Member -MemberType NoteProperty | ForEach-Object {
-            $ConfigurationData.AllNodes[0].add($_.Name,$this.($_.Name))
+         $this | Get-Member -MemberType NoteProperty,Property | ForEach-Object {
+             $NoteProperty = $_.Name
+             if ($this.$NoteProperty -is [array]) {
+                 $Array = @()
+                 
+                 $this.$NoteProperty | ForEach-Object {
+                     $ArrayObject = $_
+                     if ($ArrayObject -is [hashtable]) {
+                        $Array += $ArrayObject
+                     }
+                     elseif ($ArrayObject -is [Network]) {
+                         $Array += ($ArrayObject.getConfigurationData())
+                     }
+                 }
+                 $ConfigurationData.allnodes[0].add($NoteProperty,$Array)
+             }
+             else {
+                 $ConfigurationData.AllNodes[0].add($NoteProperty,$this.$NoteProperty)
+             }
+            
          }
 
-         $this | add-member -membertype NoteProperty -name ConfigurationData -value $ConfigurationData
+         return $ConfigurationData
 
-         return $this.ConfigurationData
-    }
+         
+     }
 
-    serializeToXML([string]$path){
+    exportXML([string]$path){
         $this | Export-Clixml -Path $path
-    }
+     }
 
     
- }
+}
 
 class MyConfiguration {
     [Node[]] $Nodes
@@ -270,11 +297,15 @@ class MyConfiguration {
             }
 
         }
+        $Networks | ForEach-Object{
+            $Network = $_
+            $Network.IPAddress = $null
+        }
         return $Networks
     }
 
 
-    [Hashtable]ConfigurationData(){
+    [Hashtable]getConfigurationData(){
         [Hashtable]$ConfigurationData = @{
             AllNodes = @(
 
@@ -299,3 +330,5 @@ class MyConfiguration {
 
 
 
+$MyConfiguration = [Myconfiguration]::new( '.\Configuration.xlsx')
+$MyConfiguration.getConfigurationData()
