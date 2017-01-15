@@ -1,5 +1,5 @@
 #Requires -Version 5
-#Requires -Modules xComputerManagement
+#Requires -Modules xComputerManagement,Hyper-V,xHyper-V
 #Requires -RunasAdministrator
 param (
     $WORKDIR = ".\",
@@ -8,7 +8,8 @@ param (
 
 #region Includes and imports
  . .\convert-windowsimage.ps1
-
+ Import-Module Hyper-V
+#region Helperfunctions
 function get-ExcelDataHashTable {
     #written by Jörg Zimmermann
     #www.burningmountain.de
@@ -51,7 +52,7 @@ function get-ExcelDataHashTable {
     $DataHashTable
  }
 
-Function Set-VMNetworkConfiguration {
+function Set-VMNetworkConfiguration {
     [CmdletBinding()]
     Param (
         [Parameter(Mandatory=$true,
@@ -135,7 +136,7 @@ Function Set-VMNetworkConfiguration {
     }
  }
 
-
+#region Class-Definitions
 class Network {
 
     [STRING]$IPAddress
@@ -327,8 +328,8 @@ class Node {
     exportXML([string]$path){
         $this | Export-Clixml -Path $path
     
-    }
-     [Microsoft.Vhd.PowerShell.VirtualHardDisk]getMasterImage(){
+     }
+    [Microsoft.Vhd.PowerShell.VirtualHardDisk]getMasterImage(){
     
         return (get-vhd -Path $this.TemplatePath)
        
@@ -376,7 +377,7 @@ class Node {
 
 
         return $this.getMasterImage()
-    }
+     }
 
     [Microsoft.Vhd.PowerShell.VirtualHardDisk] createVHD(){
         #copy the MasterImage with new name to new filelocation
@@ -390,11 +391,11 @@ class Node {
             $this | Add-Member -MemberType NoteProperty -Name VHDPath -Value $VHDPath
         }
         return $this.getVHD()
-    }
+     }
 
     [Microsoft.Vhd.PowerShell.VirtualHardDisk] getVHD(){
         return (get-vhd -path $this.VHDPath)        
-    }
+     }
 
     [Microsoft.HyperV.PowerShell.VirtualMachine]createVM(){
         $VHDPath = $this.getVHD().Path
@@ -410,11 +411,11 @@ class Node {
         }
 
         return $this.getVM()
-    }
+     }
 
     [Microsoft.HyperV.PowerShell.VirtualMachine]getVM(){
         return (get-vm -Name $this.Name)
-    }
+     }
      
     [xml] unattendXML(){
         [xml] $unattend= [xml]"<?xml version='1.0' encoding='utf-8'?>
@@ -466,8 +467,13 @@ class Node {
         </unattend>"  
         
         return $unattend
-    }
+     }
     
+    [bool]isOnline(){
+        $isOnline = $false
+        $isOnline = Test-NetConnection -CommonTCPPort WINRM -InformationLevel Quiet 
+        return $isOnline
+    }
 }
 
 class MyConfiguration {
@@ -552,7 +558,12 @@ class MyConfiguration {
         return $Networks
     }
 
-
+    [Node[]]getNodesbyName([String]$NodeName){
+        #returns all Node Objects where $NodeName matches the NodeObjects NodeName Atribute
+        $NodeArray = @()
+        $NodeArray += ($this.Nodes).where({$_.Nodename -match $NodeName})
+        return $NodeArray
+    }
     [Hashtable]getConfigurationData(){
         [Hashtable]$ConfigurationData = @{
             AllNodes = @(
@@ -577,19 +588,130 @@ class MyConfiguration {
  }
 
 #region Configurations 
-Configuration set-Computername {
+Configuration setComputername {
     param(
-        [String]$Computername,
-        [String]$NodeName
+        [String]$NewName,
+        [String]$ComputerName
     )
     Import-DscResource -Module xComputerManagement
    
-    Node $NodeName {
+    Node $ComputerName {
         xComputer NewName {
-            Name = $Computername
+            Name = $NewName
         }
         
     }
 }
 
+Configuration newVM {
+    param(
+        [Parameter (Mandatory=$true)]
+        [String]$VMHost,
+        [Parameter (Mandatory=$true)]
+        [Node]$VM
+    )
+    Import-Module xHyper-V
+    Node $VMHost {
+        xVMHyperV newVM {
+            Name = $VM.NodeName
+            VHDPath = ($VM.getVHD()).Path
+            Path = $VM.ConfigurationData.ConfigurationStandards.HyperVVMPath.value
+            SwitchName = $VM.getVMSwitch()
+            Generation = "1"
+            StartupMemory = $VM.Memory
+            ProcessorCount = $VM.cores
+            State = "Off"
+            Ensure = "Present"
+        }
+    }
+}
 
+#region Workflow Functions
+function get-MyConfiguration {
+    <#
+    .Synopsis
+     gets the Configuration from from ExcelData and outputs it as MyConfiguration Object
+    .Example
+     $MyConfiguration = get-MyConfiguration
+    #>
+    $MyConfiguration = [MyConfiguration]::new($ConfigurationPath)
+    Write-Output $MyConfiguration
+}
+
+function new-Provisioning {
+    <#
+    .Synopsis
+     Provisioning of a VM or BareMetal Machine from a [MyConfiguration] Object
+    .Description
+     Creates a Mof File for a VMHost or prepares the Environment to install a BareMetal Machine via WDS and DSC
+     After this is done, you are able to start the Configuration via start-Provisioning
+    .Parameter Nodename
+     the name of the Node to be provisioned as [String]
+    .Parameter VMHost:
+     The Node Object of one VMHost on which the Node will be provisioned as [Node]
+    .Parameter MyConfiguration
+     A MyConfiguration Object where all your Configuration is stored in as [MyConfiguration]
+    .Example 
+     The following Example shows how to provision a VM on any of its VMHosts of its VMHosts Attribute:
+     $MyConfiguration = get-MyConfiguration
+     new-Provisioning("SRVVINPDC001",$MyConfiguration)
+    .Example
+     The following Example shows how to provision a VM on a specific VMHost:
+     $MyConfiguration = get-MyConfiguration
+     $VMHost = $MyConfiguration.getNodesbyName("SRVPINHST001")
+     new-Provisioning("SRVVINPDC001",$MyConfiguration,$VMHost)    
+
+
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter (Mandatory=$true)]
+        [String]$NodeName,
+
+        [Parameter (Mandatory=$true)]
+        $MyConfiguration,
+        [Node]$VMHost
+    )
+    
+    $Node = $MyConfiguration.getNodesbyName($NodeName)
+    #check if VMHost is given 
+    if (!$VMHost -and ($Node.isVirtual)) {
+        <#
+        get vmhosts from VMHosts Atribute of the Node and check if one of them is online and ready to provision a VM
+        if more of them are online and ready for provisioning take the one with lowest count of VMs
+        #>
+        $VMHosts = $Node.VMHosts.split(",")
+        $VMHostsNodeObjectArray = @()
+        ForEach($obj in $VMHosts){
+            $VMHostNodeObject = $MyConfiguration.getNodesbyName($obj)
+            if ($VMHostNodeObject.isOnline()) {
+                $VMHostsNodeObjectArray += $VMHostNodeObject
+            }
+
+        }
+        if (!$VMHostsNodeObjectArray) {
+          Write-Error "No suitable VMHost was found"
+        }
+        #set $vmhost to the lowest VMCount
+        $VMHost = $VMHostsNodeObjectArray[0]
+        foreach($obj in $VMHostsNodeObjectArray){
+            $VMHostVMCount = (get-vm -ComputerName $VMHost).count
+            $objVMCount = (get-vm -ComputerName $VMHost).count
+            if ($VMHostVMCount -lt $objVMCount) {
+                $VMHost = $obj
+            }
+        }
+
+    }
+    if ($Node.isVirtual) {
+        #create mof for VM Provisioning
+        newVM -VMHost $VMHost -VM $Node
+        Test-DscConfiguration -ComputerName $VMHost -Verbose -Detailed
+    }
+    else {
+        #prepare WDS for BareMetal Provisioning
+        
+    }
+
+    
+}
